@@ -1,29 +1,28 @@
 import math
 import os
-import numpy as np
 from PIL import Image
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dkm.utils import get_tuple_transform_ops
-from einops import rearrange
-from dkm.utils.local_correlation import local_correlation
+from core.openmatch.DKM.dkm.utils import get_tuple_transform_ops
+from core.openmatch.DKM.dkm.utils.local_correlation import local_correlation
 
 
 class ConvRefiner(nn.Module):
     def __init__(
-        self,
-        in_dim=6,
-        hidden_dim=16,
-        out_dim=2,
-        dw=False,
-        kernel_size=5,
-        hidden_blocks=3,
-        displacement_emb = None,
-        displacement_emb_dim = None,
-        local_corr_radius = None,
-        corr_in_other = None,
-        no_support_fm = False,
+            self,
+            in_dim=6,
+            hidden_dim=16,
+            out_dim=2,
+            dw=False,
+            kernel_size=5,
+            hidden_blocks=3,
+            displacement_emb=None,
+            displacement_emb_dim=None,
+            local_corr_radius=None,
+            corr_in_other=None,
+            no_support_fm=False,
     ):
         super().__init__()
         self.block1 = self.create_block(
@@ -43,24 +42,24 @@ class ConvRefiner(nn.Module):
         self.out_conv = nn.Conv2d(hidden_dim, out_dim, 1, 1, 0)
         if displacement_emb:
             self.has_displacement_emb = True
-            self.disp_emb = nn.Conv2d(2,displacement_emb_dim,1,1,0)
+            self.disp_emb = nn.Conv2d(2, displacement_emb_dim, 1, 1, 0)
         else:
             self.has_displacement_emb = False
         self.local_corr_radius = local_corr_radius
         self.corr_in_other = corr_in_other
         self.no_support_fm = no_support_fm
+
     def create_block(
-        self,
-        in_dim,
-        out_dim,
-        dw=False,
-        kernel_size=5,
+            self,
+            in_dim,
+            out_dim,
+            dw=False,
+            kernel_size=5,
     ):
         num_groups = 1 if not dw else in_dim
         if dw:
-            assert (
-                out_dim % in_dim == 0
-            ), "outdim must be divisible by indim for depthwise"
+            if out_dim % in_dim != 0:
+                raise ValueError("outdim must be divisible by indim for depthwise")
         conv1 = nn.Conv2d(
             in_dim,
             out_dim,
@@ -75,40 +74,26 @@ class ConvRefiner(nn.Module):
         return nn.Sequential(conv1, norm, relu, conv2)
 
     def forward(self, x, y, flow):
-        """Computes the relative refining displacement in pixels for a given image x,y and a coarse flow-field between them
-
-        Args:
-            x ([type]): [description]
-            y ([type]): [description]
-            flow ([type]): [description]
-
-        Returns:
-            [type]: [description]
-        """
         device = x.device
-        b,c,hs,ws = x.shape
+        b, c, hs, ws = x.shape
         with torch.no_grad():
             x_hat = F.grid_sample(y, flow.permute(0, 2, 3, 1), align_corners=False)
         if self.has_displacement_emb:
             query_coords = torch.meshgrid(
-            (
-                torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=device),
-                torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=device),
-            )
+                (
+                    torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=device),
+                    torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=device),
+                )
             )
             query_coords = torch.stack((query_coords[1], query_coords[0]))
             query_coords = query_coords[None].expand(b, 2, hs, ws)
-            in_displacement = flow-query_coords
+            in_displacement = flow - query_coords
             emb_in_displacement = self.disp_emb(in_displacement)
             if self.local_corr_radius:
-                #TODO: should corr have gradient?
                 if self.corr_in_other:
-                    # Corr in other means take a kxk grid around the predicted coordinate in other image
-                    local_corr = local_correlation(x,y,local_radius=self.local_corr_radius,flow = flow)
+                    local_corr = local_correlation(x, y, local_radius=self.local_corr_radius, flow=flow)
                 else:
-                    # Otherwise we use the warp to sample in the first image
-                    # This is actually different operations, especially for large viewpoint changes
-                    local_corr = local_correlation(x, x_hat, local_radius=self.local_corr_radius,)
+                    local_corr = local_correlation(x, x_hat, local_radius=self.local_corr_radius, )
                 if self.no_support_fm:
                     x_hat = torch.zeros_like(x)
                 d = torch.cat((x, x_hat, emb_in_displacement, local_corr), dim=1)
@@ -125,7 +110,7 @@ class ConvRefiner(nn.Module):
         return certainty, displacement
 
 
-class CosKernel(nn.Module):  # similar to softmax kernel
+class CosKernel(nn.Module):
     def __init__(self, T, learn_temperature=False):
         super().__init__()
         self.learn_temperature = learn_temperature
@@ -136,7 +121,7 @@ class CosKernel(nn.Module):  # similar to softmax kernel
 
     def __call__(self, x, y, eps=1e-6):
         c = torch.einsum("bnd,bmd->bnm", x, y) / (
-            x.norm(dim=-1)[..., None] * y.norm(dim=-1)[:, None] + eps
+                x.norm(dim=-1)[..., None] * y.norm(dim=-1)[:, None] + eps
         )
         if self.learn_temperature:
             T = self.T.abs() + 0.01
@@ -160,7 +145,7 @@ class CAB(nn.Module):
         self.sigmod = nn.Sigmoid()
 
     def forward(self, x):
-        x1, x2 = x  # high, low (old, new)
+        x1, x2 = x
         x = torch.cat([x1, x2], dim=1)
         x = self.global_pooling(x)
         x = self.conv1(x)
@@ -206,24 +191,23 @@ class RRB(nn.Module):
 
 class DFN(nn.Module):
     def __init__(
-        self,
-        internal_dim,
-        feat_input_modules,
-        pred_input_modules,
-        rrb_d_dict,
-        cab_dict,
-        rrb_u_dict,
-        use_global_context=False,
-        global_dim=None,
-        terminal_module=None,
-        upsample_mode="bilinear",
-        align_corners=False,
+            self,
+            internal_dim,
+            feat_input_modules,
+            pred_input_modules,
+            rrb_d_dict,
+            cab_dict,
+            rrb_u_dict,
+            use_global_context=False,
+            global_dim=None,
+            terminal_module=None,
+            upsample_mode="bilinear",
+            align_corners=False,
     ):
         super().__init__()
         if use_global_context:
-            assert (
-                global_dim is not None
-            ), "Global dim must be provided when using global context"
+            if global_dim is None:
+                raise ValueError("Global dim must be provided when using global context")
         self.align_corners = align_corners
         self.internal_dim = internal_dim
         self.feat_input_modules = feat_input_modules
@@ -258,18 +242,18 @@ class DFN(nn.Module):
 
 class GP(nn.Module):
     def __init__(
-        self,
-        kernel,
-        T=1,
-        learn_temperature=False,
-        only_attention=False,
-        gp_dim=64,
-        basis="fourier",
-        covar_size=5,
-        only_nearest_neighbour=False,
-        sigma_noise=0.1,
-        no_cov=False,
-        predict_features = False,
+            self,
+            kernel,
+            T=1,
+            learn_temperature=False,
+            only_attention=False,
+            gp_dim=64,
+            basis="fourier",
+            covar_size=5,
+            only_nearest_neighbour=False,
+            sigma_noise=0.1,
+            no_cov=False,
+            predict_features=False,
     ):
         super().__init__()
         self.K = kernel(T=T, learn_temperature=learn_temperature)
@@ -287,7 +271,7 @@ class GP(nn.Module):
         K = self.covar_size
         b, h, w, h, w = cov.shape
         hw = h * w
-        cov = F.pad(cov, 4 * (K // 2,))  # pad v_q
+        cov = F.pad(cov, 4 * (K // 2,))
         delta = torch.stack(
             torch.meshgrid(
                 torch.arange(-(K // 2), K // 2 + 1), torch.arange(-(K // 2), K // 2 + 1)
@@ -301,17 +285,18 @@ class GP(nn.Module):
             dim=-1,
         )
         neighbours = positions[:, :, None, None, :] + delta[None, :, :]
-        points = torch.arange(hw)[:, None].expand(hw, K**2)
+        points = torch.arange(hw)[:, None].expand(hw, K ** 2)
         local_cov = cov.reshape(b, hw, h + K - 1, w + K - 1)[
-            :,
-            points.flatten(),
-            neighbours[..., 0].flatten(),
-            neighbours[..., 1].flatten(),
-        ].reshape(b, h, w, K**2)
+                    :,
+                    points.flatten(),
+                    neighbours[..., 0].flatten(),
+                    neighbours[..., 1].flatten(),
+                    ].reshape(b, h, w, K ** 2)
         return local_cov
 
     def reshape(self, x):
-        return rearrange(x, "b d h w -> b (h w) d")
+        b, d, h, w = x.shape
+        return torch.Tensor(np.reshape(np.array(x).transpose([0, 2, 3, 1]), [b, h * w, d]))
 
     def project_to_basis(self, x):
         if self.basis == "fourier":
@@ -335,7 +320,7 @@ class GP(nn.Module):
         coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
             None
         ].expand(b, h, w, 2)
-        coarse_coords = rearrange(coarse_coords, "b h w d -> b d h w")
+        coarse_coords = torch.Tensor(np.array(coarse_coords).transpose([0, 3, 1, 2]))
         coarse_embedded_coords = self.project_to_basis(coarse_coords)
         return coarse_embedded_coords
 
@@ -344,28 +329,28 @@ class GP(nn.Module):
         b, c, h2, w2 = y.shape
         f = self.get_pos_enc(y)
         if self.predict_features:
-            f = f + y[:,:self.dim] # Stupid way to predict features
+            f = f + y[:, :self.dim]
         b, d, h2, w2 = f.shape
-        #assert x.shape == y.shape
         x, y, f = self.reshape(x), self.reshape(y), self.reshape(f)
         K_xx = self.K(x, x)
         K_yy = self.K(y, y)
         K_xy = self.K(x, y)
         K_yx = K_xy.permute(0, 2, 1)
         sigma_noise = self.sigma_noise * torch.eye(h2 * w2, device=x.device)[None, :, :]
-        # Due to https://github.com/pytorch/pytorch/issues/16963 annoying warnings, remove batch if N large
         if len(K_yy[0]) > 2000:
-            K_yy_inv = torch.cat([torch.linalg.inv(K_yy[k:k+1] + sigma_noise[k:k+1]) for k in range(b)])
+            K_yy_inv = torch.cat([torch.linalg.inv(K_yy[k:k + 1] + sigma_noise[k:k + 1]) for k in range(b)])
         else:
             K_yy_inv = torch.linalg.inv(K_yy + sigma_noise)
 
         mu_x = K_xy.matmul(K_yy_inv.matmul(f))
-        mu_x = rearrange(mu_x, "b (h w) d -> b d h w", h=h1, w=w1)
+        b, hw, d, = mu_x.shape
+        mu_x = torch.Tensor(np.reshape(np.array(mu_x), [b, h1, w1, d]).transpose([0, 3, 1, 2]))
         if not self.no_cov:
             cov_x = K_xx - K_xy.matmul(K_yy_inv.matmul(K_yx))
-            cov_x = rearrange(cov_x, "b (h w) (r c) -> b h w r c", h=h1, w=w1, r=h1, c=w1)
+            b, hw, rc = cov_x.shape
+            mu_x = torch.Tensor(np.reshape(np.array(mu_x), [b, h1, w1, h1, w1]))
             local_cov_x = self.get_local_cov(cov_x)
-            local_cov_x = rearrange(local_cov_x, "b h w K -> b K h w")
+            local_cov_x = torch.Tensor(np.array(local_cov_x).transpose([0, 3, 1, 2]))
             gp_feats = torch.cat((mu_x, local_cov_x), dim=1)
         else:
             gp_feats = mu_x
@@ -376,6 +361,7 @@ class Encoder(nn.Module):
     def __init__(self, resnet):
         super().__init__()
         self.resnet = resnet
+
     def forward(self, x):
         x0 = x
         b, c, h, w = x.shape
@@ -404,15 +390,18 @@ class Encoder(nn.Module):
 
 class Decoder(nn.Module):
     def __init__(
-        self, embedding_decoder, gps, proj, conv_refiner, transformers = None, detach=False, scales="all", pos_embeddings = None,
+            self, embedding_decoder, gps, proj, conv_refiner, transformers=None, detach=False, scales=None,
+            pos_embeddings=None,
     ):
         super().__init__()
+        if scales is None:
+            scales = ["32", "16", "8", "4", "2", "1"]
         self.embedding_decoder = embedding_decoder
         self.gps = gps
         self.proj = proj
         self.conv_refiner = conv_refiner
         self.detach = detach
-        if scales == "all":
+        if scales is None:
             self.scales = ["32", "16", "8", "4", "2", "1"]
         else:
             self.scales = scales
@@ -429,12 +418,12 @@ class Decoder(nn.Module):
         )
         delta_certainty, delta_flow = self.conv_refiner["1"](query, support, flow)
         flow = torch.stack(
-                (
-                    flow[:, 0] + delta_flow[:, 0] / (4 * w),
-                    flow[:, 1] + delta_flow[:, 1] / (4 * h),
-                ),
-                dim=1,
-            )
+            (
+                flow[:, 0] + delta_flow[:, 0] / (4 * w),
+                flow[:, 1] + delta_flow[:, 1] / (4 * h),
+            ),
+            dim=1,
+        )
         flow = flow.permute(0, 2, 3, 1)
         certainty = certainty + delta_certainty
         return flow, certainty
@@ -449,11 +438,10 @@ class Decoder(nn.Module):
         coarse_coords = torch.stack((coarse_coords[1], coarse_coords[0]), dim=-1)[
             None
         ].expand(b, h, w, 2)
-        coarse_coords = rearrange(coarse_coords, "b h w d -> b d h w")
+        coarse_coords = torch.Tensor(np.array(coarse_coords).transpose([0, 3, 1, 2]))
         return coarse_coords
 
-
-    def forward(self, f1, f2, upsample = False, dense_flow = None, dense_certainty = None):
+    def forward(self, f1, f2, upsample=False, dense_flow=None, dense_certainty=None):
         coarse_scales = self.embedding_decoder.scales()
         all_scales = self.scales if not upsample else ["8", "4", "2", "1"]
         sizes = {scale: f1[scale].shape[-2:] for scale in f1}
@@ -461,26 +449,16 @@ class Decoder(nn.Module):
         b = f1[1].shape[0]
         device = f1[1].device
         coarsest_scale = int(all_scales[0])
-        old_stuff = torch.zeros(
-            b, self.embedding_decoder.internal_dim, *sizes[coarsest_scale], device=f1[coarsest_scale].device
-        )
+        old_stuff = torch.zeros(b, self.embedding_decoder.internal_dim, *sizes[coarsest_scale],
+                                device=f1[coarsest_scale].device)
         dense_corresps = {}
         if not upsample:
             dense_flow = self.get_placeholder_flow(b, *sizes[coarsest_scale], device)
             dense_certainty = 0.0
         else:
-            dense_flow = F.interpolate(
-                    dense_flow,
-                    size=sizes[coarsest_scale],
-                    align_corners=False,
-                    mode="bilinear",
-                )
-            dense_certainty = F.interpolate(
-                    dense_certainty,
-                    size=sizes[coarsest_scale],
-                    align_corners=False,
-                    mode="bilinear",
-                )
+            dense_flow = F.interpolate(dense_flow, size=sizes[coarsest_scale], align_corners=False, mode="bilinear")
+            dense_certainty = F.interpolate(dense_certainty, size=sizes[coarsest_scale], align_corners=False,
+                                            mode="bilinear")
         for new_scale in all_scales:
             ins = int(new_scale)
             f1_s, f2_s = f1[ins], f2[ins]
@@ -492,44 +470,18 @@ class Decoder(nn.Module):
                     old_stuff, size=sizes[ins], mode="bilinear", align_corners=False
                 )
                 new_stuff = self.gps[new_scale](f1_s, f2_s, dense_flow=dense_flow)
-                dense_flow, dense_certainty, old_stuff = self.embedding_decoder(
-                    new_stuff, f1_s, old_stuff, new_scale
-                )
-
+                dense_flow, dense_certainty, old_stuff = self.embedding_decoder(new_stuff, f1_s, old_stuff, new_scale)
             if new_scale in self.conv_refiner:
-                delta_certainty, displacement = self.conv_refiner[new_scale](
-                    f1_s, f2_s, dense_flow
-                )
-                dense_flow = torch.stack(
-                    (
-                        dense_flow[:, 0] + ins * displacement[:, 0] / (4 * w),
-                        dense_flow[:, 1] + ins * displacement[:, 1] / (4 * h),
-                    ),
-                    dim=1,
-                )
-                dense_certainty = (
-                    dense_certainty + delta_certainty
-                )  # predict both certainty and displacement
-
-            dense_corresps[ins] = {
-                "dense_flow": dense_flow,
-                "dense_certainty": dense_certainty,
-            }
+                delta_certainty, displacement = self.conv_refiner[new_scale](f1_s, f2_s, dense_flow)
+                dense_flow = torch.stack((dense_flow[:, 0] + ins * displacement[:, 0] / (4 * w),
+                                          dense_flow[:, 1] + ins * displacement[:, 1] / (4 * h)), dim=1)
+                dense_certainty = (dense_certainty + delta_certainty)  # predict both certainty and displacement
+            dense_corresps[ins] = {"dense_flow": dense_flow, "dense_certainty": dense_certainty}
 
             if new_scale != "1":
-                dense_flow = F.interpolate(
-                    dense_flow,
-                    size=sizes[ins // 2],
-                    align_corners=False,
-                    mode="bilinear",
-                )
-
-                dense_certainty = F.interpolate(
-                    dense_certainty,
-                    size=sizes[ins // 2],
-                    align_corners=False,
-                    mode="bilinear",
-                )
+                dense_flow = F.interpolate(dense_flow, size=sizes[ins // 2], align_corners=False, mode="bilinear")
+                dense_certainty = F.interpolate(dense_certainty, size=sizes[ins // 2], align_corners=False,
+                                                mode="bilinear")
                 if self.detach:
                     dense_flow = dense_flow.detach()
                     dense_certainty = dense_certainty.detach()
@@ -538,19 +490,19 @@ class Decoder(nn.Module):
 
 class RegressionMatcher(nn.Module):
     def __init__(
-        self,
-        encoder,
-        decoder,
-        h=384,
-        w=512,
-        use_contrastive_loss = False,
-        alpha = 1,
-        beta = 0,
-        sample_mode = "threshold",
-        upsample_preds = False,
-        symmetric = False,
-        name = None,
-        use_soft_mutual_nearest_neighbours = False,
+            self,
+            encoder,
+            decoder,
+            h=384,
+            w=512,
+            use_contrastive_loss=False,
+            alpha=1,
+            beta=0,
+            sample_mode="threshold",
+            upsample_preds=False,
+            symmetric=False,
+            name=None,
+            use_soft_mutual_nearest_neighbours=False,
     ):
         super().__init__()
         self.encoder = encoder
@@ -566,13 +518,12 @@ class RegressionMatcher(nn.Module):
         self.symmetric = symmetric
         self.name = name
         self.sample_thresh = 0.05
-        self.upsample_res = (864,1152)
-        if use_soft_mutual_nearest_neighbours:
-            assert symmetric, "MNS requires symmetric inference"
+        self.upsample_res = (864, 1152)
+        if use_soft_mutual_nearest_neighbours and not symmetric:
+            raise ValueError("MNS requires symmetric inference")
         self.use_soft_mutual_nearest_neighbours = use_soft_mutual_nearest_neighbours
-        
-    def extract_backbone_features(self, batch, batched = True, upsample = True):
-        #TODO: only extract stride [1,2,4,8] for upsample = True
+
+    def extract_backbone_features(self, batch, batched=True, upsample=True):
         x_q = batch["query"]
         x_s = batch["support"]
         if batched:
@@ -583,17 +534,17 @@ class RegressionMatcher(nn.Module):
         return feature_pyramid
 
     def sample(
-        self,
-        dense_matches,
-        dense_certainty,
-        num=10000,
+            self,
+            dense_matches,
+            dense_certainty,
+            num=10000,
     ):
         if "threshold" in self.sample_mode:
             upper_thresh = self.sample_thresh
             dense_certainty = dense_certainty.clone()
             dense_certainty[dense_certainty > upper_thresh] = 1
         elif "pow" in self.sample_mode:
-            dense_certainty = dense_certainty**(1/3)
+            dense_certainty = dense_certainty ** (1 / 3)
         elif "naive" in self.sample_mode:
             dense_certainty = torch.ones_like(dense_certainty)
         matches, certainty = (
@@ -601,159 +552,137 @@ class RegressionMatcher(nn.Module):
             dense_certainty.reshape(-1),
         )
         expansion_factor = 4 if "balanced" in self.sample_mode else 1
-        good_samples = torch.multinomial(certainty, 
-                          num_samples = min(expansion_factor*num, len(certainty)), 
-                          replacement=False)
+        good_samples = torch.multinomial(certainty,
+                                         num_samples=min(expansion_factor * num, len(certainty)),
+                                         replacement=False)
         good_matches, good_certainty = matches[good_samples], certainty[good_samples]
         if "balanced" not in self.sample_mode:
             return good_matches, good_certainty
 
-        from dkm.utils.kde import kde
+        from core.openmatch.DKM.dkm.utils.kde import kde
         density = kde(good_matches, std=0.1)
-        p = 1 / (density+1)
-        p[density < 10] = 1e-7 # Basically should have at least 10 perfect neighbours, or around 100 ok ones
-        balanced_samples = torch.multinomial(p, 
-                          num_samples = min(num,len(good_certainty)), 
-                          replacement=False)
+        p = 1 / (density + 1)
+        p[density < 10] = 1e-7  # Basically should have at least 10 perfect neighbours, or around 100 ok ones
+        balanced_samples = torch.multinomial(p,
+                                             num_samples=min(num, len(good_certainty)),
+                                             replacement=False)
         return good_matches[balanced_samples], good_certainty[balanced_samples]
 
-    def forward(self, batch, batched = True, upsample = False):
-        feature_pyramid = self.extract_backbone_features(batch, batched=batched, upsample = upsample)
-        if batched:
-            f_q_pyramid = {
-                scale: f_scale.chunk(2)[0] for scale, f_scale in feature_pyramid.items()
-            }
-            f_s_pyramid = {
-                scale: f_scale.chunk(2)[1] for scale, f_scale in feature_pyramid.items()
-            }
-        else:
-            f_q_pyramid, f_s_pyramid = feature_pyramid
-        dense_corresps = self.decoder(f_q_pyramid, f_s_pyramid, upsample = upsample, **(batch["corresps"] if "corresps" in batch else {}))
-        if self.training and self.use_contrastive_loss:
-            return dense_corresps, (f_q_pyramid, f_s_pyramid)
-        else:
-            return dense_corresps
-
-    def forward_symmetric(self, batch, upsample = False, batched = True):
-        feature_pyramid = self.extract_backbone_features(batch, upsample = upsample, batched = batched)
+    def forward_symmetric(self, batch, upsample=False, batched=True):
+        feature_pyramid = self.extract_backbone_features(batch, upsample=upsample, batched=batched)
         f_q_pyramid = feature_pyramid
         f_s_pyramid = {
             scale: torch.cat((f_scale.chunk(2)[1], f_scale.chunk(2)[0]))
             for scale, f_scale in feature_pyramid.items()
         }
-        dense_corresps = self.decoder(f_q_pyramid, f_s_pyramid, upsample = upsample, **(batch["corresps"] if "corresps" in batch else {}))
+        dense_corresps = self.decoder(f_q_pyramid, f_s_pyramid, upsample=upsample,
+                                      **(batch["corresps"] if "corresps" in batch else {}))
         return dense_corresps
-    
+
     def to_pixel_coordinates(self, matches, H_A, W_A, H_B, W_B):
-        kpts_A, kpts_B = matches[...,:2], matches[...,2:]
-        kpts_A = torch.stack((W_A/2 * (kpts_A[...,0]+1), H_A/2 * (kpts_A[...,1]+1)),axis=-1)
-        kpts_B = torch.stack((W_B/2 * (kpts_B[...,0]+1), H_B/2 * (kpts_B[...,1]+1)),axis=-1)
+        kpts_A, kpts_B = matches[..., :2], matches[..., 2:]
+        kpts_A = torch.stack((W_A / 2 * (kpts_A[..., 0] + 1), H_A / 2 * (kpts_A[..., 1] + 1)), axis=-1)
+        kpts_B = torch.stack((W_B / 2 * (kpts_B[..., 0] + 1), H_B / 2 * (kpts_B[..., 1] + 1)), axis=-1)
         return kpts_A, kpts_B
-    
-    def match(
-        self,
-        im1_path,
-        im2_path,
-        *args,
-        batched=False,
-        device = None
-    ):
-        assert not (batched and self.upsample_preds), "Cannot upsample preds if in batchmode (as we don't have access to high res images). You can turn off upsample_preds by model.upsample_preds = False "
+
+    def match_prepare(self, im1_path, im2_path, *args, batched=False, device=None):
+        if batched and self.upsample_preds:
+            raise ValueError("Cannot upsample preds if in batchmode (as we don't have access to high res images). "
+                             "You can turn off upsample_preds by model.upsample_preds = False")
+
         if isinstance(im1_path, (str, os.PathLike)):
             im1, im2 = Image.open(im1_path), Image.open(im2_path)
-        else: # assume it is a PIL Image
+        else:  # assume it is a PIL Image
             im1, im2 = im1_path, im2_path
+
         if device is None:
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
         symmetric = self.symmetric
         self.train(False)
-        with torch.no_grad():
-            if not batched:
-                b = 1
-                w, h = im1.size
-                w2, h2 = im2.size
-                # Get images in good format
-                ws = self.w_resized
-                hs = self.h_resized
 
-                test_transform = get_tuple_transform_ops(
-                    resize=(hs, ws), normalize=True
-                )
-                query, support = test_transform((im1, im2))
-                batch = {"query": query[None].to(device), "support": support[None].to(device)}
-            else:
-                b, c, h, w = im1.shape
-                b, c, h2, w2 = im2.shape
-                assert w == w2 and h == h2, "For batched images we assume same size"
-                batch = {"query": im1.to(device), "support": im2.to(device)}
-                hs, ws = self.h_resized, self.w_resized
-            finest_scale = 1
-            # Run matcher
-            if symmetric:
-                dense_corresps  = self.forward_symmetric(batch, batched = True)
-            else:
-                dense_corresps = self.forward(batch, batched = True)
-            
-            if self.upsample_preds:
-                hs, ws = self.upsample_res
-            low_res_certainty = F.interpolate(
-            dense_corresps[16]["dense_certainty"], size=(hs, ws), align_corners=False, mode="bilinear"
-            )
-            cert_clamp = 0
-            factor = 0.5
-            low_res_certainty = factor*low_res_certainty*(low_res_certainty < cert_clamp)
+        if not batched:
+            b = 1
+            w, h = im1.size
+            w2, h2 = im2.size
+            ws = self.w_resized
+            hs = self.h_resized
+            test_transform = get_tuple_transform_ops(resize=(hs, ws), normalize=True)
+            query, support = test_transform((im1, im2))
+            batch = {"query": query[None].to(device), "support": support[None].to(device)}
+        else:
+            b, c, h, w = im1.shape
+            b, c, h2, w2 = im2.shape
 
-            if self.upsample_preds: 
-                test_transform = get_tuple_transform_ops(
-                    resize=(hs, ws), normalize=True
-                )
-                query, support = test_transform((im1, im2))
-                query, support = query[None].to(device), support[None].to(device)
-                batch = {"query": query, "support": support, "corresps": dense_corresps[finest_scale]}
-                if symmetric:
-                    dense_corresps = self.forward_symmetric(batch, upsample = True, batched=True)
-                else:
-                    dense_corresps = self.forward(batch, batched = True, upsample=True)
-            query_to_support = dense_corresps[finest_scale]["dense_flow"]
-            dense_certainty = dense_corresps[finest_scale]["dense_certainty"]
-            
-            # Get certainty interpolation
-            dense_certainty = dense_certainty - low_res_certainty
-            query_to_support = query_to_support.permute(
-                0, 2, 3, 1
-                )
-            # Create im1 meshgrid
-            query_coords = torch.meshgrid(
-                (
-                    torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=device),
-                    torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=device),
-                )
-            )
-            query_coords = torch.stack((query_coords[1], query_coords[0]))
-            query_coords = query_coords[None].expand(b, 2, hs, ws)
-            dense_certainty = dense_certainty.sigmoid()  # logits -> probs
-            query_coords = query_coords.permute(0, 2, 3, 1)
-            if (query_to_support.abs() > 1).any() and True:
-                wrong = (query_to_support.abs() > 1).sum(dim=-1) > 0
-                dense_certainty[wrong[:,None]] = 0
-                
-            query_to_support = torch.clamp(query_to_support, -1, 1)
+            if not (w == w2 and h == h2):
+                raise ValueError("For batched images we assume same size")
+
+            batch = {"query": im1.to(device), "support": im2.to(device)}
+            hs, ws = self.h_resized, self.w_resized
+
+        return im1, im2, b, hs, ws, device, symmetric, batch
+
+    def match(self, im1_path, im2_path, *args, batched=False, device=None):
+        im1, im2, b, hs, ws, device, symmetric, batch = self.match_prepare(im1_path, im2_path, batched=batched,
+                                                                           device=device)
+        finest_scale = 1
+        # Run matcher
+        if symmetric:
+            dense_corresps = self.forward_symmetric(batch, batched=True)
+        else:
+            dense_corresps = self.forward(batch, batched=True)
+
+        if self.upsample_preds:
+            hs, ws = self.upsample_res
+
+        low_res_certainty = F.interpolate(
+            dense_corresps[16]["dense_certainty"], size=(hs, ws), align_corners=False, mode="bilinear")
+
+        cert_clamp = 0
+        factor = 0.5
+        low_res_certainty = factor * low_res_certainty * (low_res_certainty < cert_clamp)
+
+        if self.upsample_preds:
+            test_transform = get_tuple_transform_ops(resize=(hs, ws), normalize=True)
+            query, support = test_transform((im1, im2))
+            query, support = query[None].to(device), support[None].to(device)
+            batch = {"query": query, "support": support, "corresps": dense_corresps[finest_scale]}
+
             if symmetric:
-                support_coords = query_coords
-                qts, stq = query_to_support.chunk(2)                    
-                q_warp = torch.cat((query_coords, qts), dim=-1)
-                s_warp = torch.cat((stq, support_coords), dim=-1)
-                warp = torch.cat((q_warp, s_warp),dim=2)
-                dense_certainty = torch.cat(dense_certainty.chunk(2), dim=3)[:,0]
+                dense_corresps = self.forward_symmetric(batch, upsample=True, batched=True)
             else:
-                warp = torch.cat((query_coords, query_to_support), dim=-1)
-            if batched:
-                return (
-                    warp,
-                    dense_certainty
-                )
-            else:
-                return (
-                    warp[0],
-                    dense_certainty[0],
-                )
+                dense_corresps = self.forward(batch, batched=True)
+
+        query_to_support = dense_corresps[finest_scale]["dense_flow"]
+        dense_certainty = dense_corresps[finest_scale]["dense_certainty"]
+
+        dense_certainty = dense_certainty - low_res_certainty
+        query_to_support = query_to_support.permute(0, 2, 3, 1)
+
+        query_coords = torch.meshgrid((torch.linspace(-1 + 1 / hs, 1 - 1 / hs, hs, device=device),
+                                       torch.linspace(-1 + 1 / ws, 1 - 1 / ws, ws, device=device)))
+
+        query_coords = torch.stack((query_coords[1], query_coords[0]))
+        query_coords = query_coords[None].expand(b, 2, hs, ws)
+        dense_certainty = dense_certainty.sigmoid()
+        query_coords = query_coords.permute(0, 2, 3, 1)
+
+        if (query_to_support.abs() > 1).any() and True:
+            wrong = (query_to_support.abs() > 1).sum(dim=-1) > 0
+            dense_certainty[wrong[:, None]] = 0
+
+        query_to_support = torch.clamp(query_to_support, -1, 1)
+
+        if symmetric:
+            support_coords = query_coords
+            qts, stq = query_to_support.chunk(2)
+            q_warp = torch.cat((query_coords, qts), dim=-1)
+            s_warp = torch.cat((stq, support_coords), dim=-1)
+            warp = torch.cat((q_warp, s_warp), dim=2)
+            dense_certainty = torch.cat(dense_certainty.chunk(2), dim=3)[:, 0]
+        else:
+            warp = torch.cat((query_coords, query_to_support), dim=-1)
+        if batched:
+            return warp, dense_certainty
+        else:
+            return warp[0], dense_certainty[0]
