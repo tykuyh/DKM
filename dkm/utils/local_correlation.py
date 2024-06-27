@@ -12,7 +12,6 @@ def local_correlation(
     device = feature0.device
     b, c, h, w = feature0.size()
     if flow is None:
-        # If flow is None, assume feature0 and feature1 are aligned
         coords = torch.meshgrid(
                 (
                     torch.linspace(-1 + 1 / h, 1 - 1 / h, h, device=device),
@@ -22,7 +21,7 @@ def local_correlation(
             None
         ].expand(b, h, w, 2)
     else:
-        coords = flow.permute(0,2,3,1) # If using flow, sample around flow target.
+        coords = flow.permute(0,2,3,1)
     r = local_radius
     local_window = torch.meshgrid(
                 (
